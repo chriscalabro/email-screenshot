@@ -205,17 +205,17 @@
 </head>
 <body>
   <h1>Email Screenshot</h1>
-  <p class="subtitle">Drop an .eml file to generate a screenshot</p>
+  <p class="subtitle">Drop .eml files to generate screenshots</p>
 
   <div class="card">
     <!-- Upload state -->
     <div id="upload-section">
       <div class="drop-zone" id="drop-zone">
         <div class="drop-zone-icon">&#9993;</div>
-        <div class="drop-zone-text"><strong>Drop .eml file here</strong> or click to browse</div>
-        <div class="drop-zone-hint">.eml files only</div>
+        <div class="drop-zone-text"><strong>Drop .eml file(s) here</strong> or click to browse</div>
+        <div class="drop-zone-hint">.eml files only &middot; maximum 30 files at once</div>
       </div>
-      <input type="file" id="file-input" accept=".eml">
+      <input type="file" id="file-input" accept=".eml" multiple>
 
       <div class="settings">
         <div class="setting">
@@ -246,13 +246,24 @@
       <div class="loading-text">Generating screenshot...</div>
     </div>
 
-    <!-- Result state -->
+    <!-- Result state (single) -->
     <div class="result" id="result-section">
       <div class="result-actions">
-        <a class="btn btn-primary" id="download-btn" download>Download PNG</a>
+        <button class="btn btn-primary" id="copy-btn">Copy to Clipboard</button>
+        <a class="btn btn-secondary" id="download-btn" download>Download PNG</a>
         <button class="btn btn-secondary" id="reset-btn">Upload Another</button>
       </div>
       <img class="result-image" id="result-image" alt="Email screenshot">
+    </div>
+
+    <!-- Result state (bulk) -->
+    <div class="result" id="bulk-result-section">
+      <p id="bulk-summary" style="font-size:15px;color:#333;margin-bottom:16px;"></p>
+      <p id="bulk-errors" style="font-size:13px;color:#b91c1c;margin-bottom:16px;display:none;"></p>
+      <div class="result-actions">
+        <a class="btn btn-primary" id="bulk-download-btn" download="email-screenshots.zip">Download ZIP</a>
+        <button class="btn btn-secondary" id="bulk-reset-btn">Upload More</button>
+      </div>
     </div>
   </div>
 
@@ -265,13 +276,21 @@
     const showPreview = document.getElementById('show-preview');
     const uploadSection = document.getElementById('upload-section');
     const loadingSection = document.getElementById('loading-section');
+    const loadingText = loadingSection.querySelector('.loading-text');
     const resultSection = document.getElementById('result-section');
     const resultImage = document.getElementById('result-image');
     const downloadBtn = document.getElementById('download-btn');
+    const copyBtn = document.getElementById('copy-btn');
     const resetBtn = document.getElementById('reset-btn');
+    const bulkResultSection = document.getElementById('bulk-result-section');
+    const bulkSummary = document.getElementById('bulk-summary');
+    const bulkErrors = document.getElementById('bulk-errors');
+    const bulkDownloadBtn = document.getElementById('bulk-download-btn');
+    const bulkResetBtn = document.getElementById('bulk-reset-btn');
     const errorEl = document.getElementById('error');
 
     let currentObjectUrl = null;
+    let currentBlob = null;
 
     // Drag and drop
     dropZone.addEventListener('dragover', (e) => {
@@ -286,27 +305,61 @@
     dropZone.addEventListener('drop', (e) => {
       e.preventDefault();
       dropZone.classList.remove('drag-over');
-      const file = e.dataTransfer.files[0];
-      if (file) handleFile(file);
+      const allFiles = Array.from(e.dataTransfer.files);
+      const emlFiles = allFiles.filter(f => f.name.toLowerCase().endsWith('.eml'));
+      if (emlFiles.length === 0) {
+        showError('Please drop .eml files');
+        return;
+      }
+      if (emlFiles.length < allFiles.length) {
+        showError(`${allFiles.length - emlFiles.length} non-.eml file(s) were ignored`);
+      }
+      handleFiles(emlFiles);
     });
 
     // Click to browse
     dropZone.addEventListener('click', () => fileInput.click());
 
     fileInput.addEventListener('change', () => {
-      if (fileInput.files[0]) handleFile(fileInput.files[0]);
+      const files = Array.from(fileInput.files);
+      if (files.length > 0) handleFiles(files);
+    });
+
+    // Copy to clipboard
+    copyBtn.addEventListener('click', async () => {
+      if (!currentBlob) return;
+      try {
+        await navigator.clipboard.write([
+          new ClipboardItem({ 'image/png': currentBlob })
+        ]);
+        const original = copyBtn.textContent;
+        copyBtn.textContent = 'Copied!';
+        setTimeout(() => { copyBtn.textContent = original; }, 30000);
+      } catch (err) {
+        showError('Could not copy to clipboard');
+      }
     });
 
     // Reset
     resetBtn.addEventListener('click', reset);
+    bulkResetBtn.addEventListener('click', reset);
 
-    async function handleFile(file) {
-      if (!file.name.endsWith('.eml')) {
-        showError('Please upload a .eml file');
+    function handleFiles(files) {
+      const emlFiles = files.filter(f => f.name.toLowerCase().endsWith('.eml'));
+      if (emlFiles.length === 0) {
+        showError('Please upload .eml files');
         return;
       }
-
       hideError();
+      if (emlFiles.length === 1) {
+        handleSingleFile(emlFiles[0]);
+      } else {
+        handleBulkFiles(emlFiles);
+      }
+    }
+
+    async function handleSingleFile(file) {
+      loadingText.textContent = 'Generating screenshot...';
       showLoading();
 
       const formData = new FormData();
@@ -328,8 +381,8 @@
         }
 
         const blob = await response.blob();
+        currentBlob = blob;
 
-        // Revoke previous URL if any
         if (currentObjectUrl) URL.revokeObjectURL(currentObjectUrl);
 
         currentObjectUrl = URL.createObjectURL(blob);
@@ -344,22 +397,74 @@
       }
     }
 
+    async function handleBulkFiles(files) {
+      loadingText.textContent = `Processing ${files.length} emails...`;
+      showLoading();
+
+      const formData = new FormData();
+      for (const file of files) {
+        formData.append('eml', file);
+      }
+      formData.append('width', widthInput.value);
+      formData.append('showHeader', showHeader.checked.toString());
+      formData.append('showDate', showDate.checked.toString());
+      formData.append('showPreview', showPreview.checked.toString());
+
+      try {
+        const response = await fetch('/api/screenshot/bulk', {
+          method: 'POST',
+          body: formData,
+        });
+
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({}));
+          const msg = err.details
+            ? `All files failed: ${err.details.map(d => d.name).join(', ')}`
+            : (err.error || 'Screenshot generation failed');
+          throw new Error(msg);
+        }
+
+        const blob = await response.blob();
+        if (currentObjectUrl) URL.revokeObjectURL(currentObjectUrl);
+        currentObjectUrl = URL.createObjectURL(blob);
+
+        bulkDownloadBtn.href = currentObjectUrl;
+        bulkSummary.textContent = `${files.length} email(s) processed successfully.`;
+        bulkErrors.style.display = 'none';
+
+        showBulkResult();
+      } catch (err) {
+        showUpload();
+        showError(err.message);
+      }
+    }
+
     function showLoading() {
       uploadSection.style.display = 'none';
       loadingSection.style.display = 'block';
       resultSection.style.display = 'none';
+      bulkResultSection.style.display = 'none';
     }
 
     function showResult() {
       uploadSection.style.display = 'none';
       loadingSection.style.display = 'none';
       resultSection.style.display = 'block';
+      bulkResultSection.style.display = 'none';
+    }
+
+    function showBulkResult() {
+      uploadSection.style.display = 'none';
+      loadingSection.style.display = 'none';
+      resultSection.style.display = 'none';
+      bulkResultSection.style.display = 'block';
     }
 
     function showUpload() {
       uploadSection.style.display = 'block';
       loadingSection.style.display = 'none';
       resultSection.style.display = 'none';
+      bulkResultSection.style.display = 'none';
     }
 
     function reset() {
@@ -367,6 +472,7 @@
         URL.revokeObjectURL(currentObjectUrl);
         currentObjectUrl = null;
       }
+      currentBlob = null;
       fileInput.value = '';
       hideError();
       showUpload();
